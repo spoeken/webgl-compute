@@ -1,3 +1,8 @@
+// import { resolveLygia } from "resolve-lygia";
+
+// @ts-ignore
+// import { resolveLygia } from "resolve-lygia";
+
 type int = number;
 
 type TDataType = "f32" | "f16" | "ui8";
@@ -16,7 +21,7 @@ type TIndexedFBO<DataType extends TDataType = TDataType> = {
   indexDims: int[];
 } & TFBO<DataType>;
 
-type TVecOrMatArgType = `${"int" | "float" | "mat"}${2 | 3 | 4}`;
+type TVecOrMatArgType = `${"int" | "float" | "mat" | "vec"}${2 | 3 | 4}`;
 type TArgs = Record<string, "fbo" | "int" | "float" | TVecOrMatArgType>;
 type TCompiledArgs<Args extends TArgs> = {
   [K in keyof Args]: { type: Args[K]; uniformLoc: WebGLUniformLocation };
@@ -32,6 +37,8 @@ type TPassedArgs<Args extends TArgs> = {
 type TComputation<Args extends TArgs> = {
   glProgram: WebGLProgram;
   vertexAttribLoc: int;
+  vertexBuffer: any;
+  vertexBufferData: any;
   args: TCompiledArgs<Args>;
 };
 
@@ -81,6 +88,7 @@ export function init(gl: WebGL2RenderingContext) {
     );
 
     const shader = gl.createShader(shaderType)!;
+    // const lygiaResolvedShader = resolveLygia(shaderSource);
     gl.shaderSource(shader, shaderSource);
     gl.compileShader(shader);
 
@@ -348,10 +356,29 @@ void main() {
   const createComputation = <Args extends TArgs>(
     args: Args,
     fragmentShaderBody: string,
-    fragmentShaderHelpers: string = ""
+    fragmentShaderHelpers: string = "",
+    vertexShaderBody: string = "",
+    vertexShaderHelpers: string = "",
+    bufferLength: number = 0
   ): TComputation<Args> => {
     const glProgram = _createProgram(
-      _fullScreenVertexShader,
+      _compileShader(
+        `#version 300 es
+in vec4 position;
+${Object.entries(args)
+  .map(
+    ([name, type]) => `
+uniform ${type === "fbo" ? "sampler2D" : type} ${name};`
+  )
+  .join("")}
+${vertexShaderHelpers}
+void main() {
+  gl_Position = position;
+  ${vertexShaderBody}
+}
+`,
+        gl.VERTEX_SHADER
+      ),
       _compileShader(
         /* GLSL */ `#version 300 es
 precision highp float;
@@ -371,6 +398,15 @@ void main() {
         gl.FRAGMENT_SHADER
       )
     );
+    let vertexBuffer = null;
+    let vertexBufferData = null;
+    if (bufferLength) {
+      vertexBuffer = gl.createBuffer();
+
+      vertexBufferData = new Float32Array(
+        new Array(bufferLength * 2).fill([0.0, 0.0, 0.0, 0.0]).flat()
+      );
+    }
 
     return {
       glProgram,
@@ -381,6 +417,8 @@ void main() {
         ])
       ) as TCompiledArgs<Args>,
       vertexAttribLoc: gl.getAttribLocation(glProgram, "position"),
+      vertexBuffer,
+      vertexBufferData,
     };
   };
 
@@ -393,7 +431,8 @@ void main() {
   const runComputation = <Args extends TArgs>(
     computation: TComputation<Args>,
     outputFBO: TFBO | "canvas",
-    args: TPassedArgs<Args>
+    args: TPassedArgs<Args>,
+    usePoints: number = 0
   ) => {
     gl.useProgram(computation.glProgram);
 
@@ -422,7 +461,7 @@ void main() {
       } else if (type === "int") {
         gl.uniform1i(uniformLoc, args[name] as number);
       } else {
-        const [_, numType, dims] = type.match(/(int|float|mat)([2-4])/);
+        const [_, numType, dims] = type.match(/(int|float|mat|vec)([2-4])/);
         // @ts-ignore
         gl[
           `uniform${numType === "mat" ? "Matrix" : ""}${dims}${
@@ -431,9 +470,22 @@ void main() {
         ](uniformLoc, args[name]);
       }
     }
+    if (usePoints) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, computation.vertexBuffer);
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        computation.vertexBufferData,
+        gl.STATIC_DRAW
+      );
+    } else {
+      gl.bindBuffer(gl.ARRAY_BUFFER, _fullScreenVertexBuffer);
+      gl.bufferData(
+        gl.ARRAY_BUFFER,
+        _fullScreenVertexBufferData,
+        gl.STATIC_DRAW
+      );
+    }
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, _fullScreenVertexBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, _fullScreenVertexBufferData, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(computation.vertexAttribLoc);
     gl.vertexAttribPointer(
       computation.vertexAttribLoc,
@@ -443,8 +495,11 @@ void main() {
       0,
       0
     );
-
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (usePoints) {
+      gl.drawArrays(gl.POINTS, 0, usePoints * 2);
+    } else {
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   };
